@@ -40,7 +40,7 @@ export default function AuthPage() {
         </div>
 
         <input value={username} onChange={e => setUsername(e.target.value)}
-          placeholder="Username" autoComplete="username" required
+          placeholder="Username or email" autoComplete="username" required
           className="w-full px-3 py-2 rounded-lg bg-slate-700 outline-none" />
 
         <input value={password} onChange={e => setPassword(e.target.value)}

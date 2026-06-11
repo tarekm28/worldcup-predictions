@@ -12,8 +12,13 @@ type AuthContextType = {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
-// Supabase needs an email; we derive a fake one from the username.
-const emailFor = (username: string) => `${username.trim().toLowerCase()}@worldcup.local`
+// Supabase needs an email. Allow a full email or derive a fake one from a username.
+const emailFor = (value: string) => {
+  const trimmed = value.trim().toLowerCase()
+  if (trimmed.includes('@')) return trimmed
+  const local = trimmed.replace(/\s+/g, '.').replace(/[^a-z0-9._-]/g, '')
+  return `${local}@worldcup.local`
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
