@@ -1,0 +1,8 @@
+# Minimal Supabase CLI config so `supabase functions deploy` works.
+# project_id is your project ref (the subdomain of your Supabase URL).
+project_id = "dojlxfoyvvunjocjjddd"
+
+[functions.sync-matches]
+# This sync runs server-side via cron with the x-cron-secret header,
+# so it doesn't need a logged-in user's JWT.
+verify_jwt = false
