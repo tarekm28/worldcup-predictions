@@ -79,12 +79,19 @@ const MATCHDAY_LABEL = {
   group_md2: "Group Stage · Matchday 2",
   group_md3: "Group Stage · Matchday 3",
   ro32: "Round of 32", ro16: "Round of 16",
-  qf: "Quarter-finals", sf: "Semi-finals", final: "Final",
+  qf: "Quarter-finals", sf: "Semi-finals", third_place: "Third place", final: "Final",
 };
 function matchdaySlug(m){
-  if(m.group != null) return `group_md${m.matchday}`;
-  const ko = { "Round of 32":"ro32","Round of 16":"ro16","Quarter-final":"qf","Semi-final":"sf","Third place":"final","Final":"final" };
-  return ko[m.round] ?? "ko";
+  if(m.group != null || m.group_code != null || m.stage === "group") return `group_md${String(m.matchday).trim()}`;
+  const ko = {
+    "Round of 32":"ro32",
+    "Round of 16":"ro16",
+    "Quarter-final":"qf",
+    "Semi-final":"sf",
+    "Third place":"third_place",
+    "Final":"final",
+  };
+  return ko[m.round] ?? ko[m.stage] ?? "ko";
 }
 
 // Group-stage calendar. Day 0 = Jun 11 2026 (opening day, Mexico v South Africa).
@@ -103,6 +110,52 @@ function statusOf(m, asOf){
     return Date.now() >= m.kickoffMs ? "today" : "open";
   }
   if(m.day < asOf) return "finished"; if(m.day === asOf) return "today"; return "open";
+}
+
+function groupStageMatchdayFromKickoff(kickoffMs, homeCode, awayCode){
+  const normalized = [homeCode?.toLowerCase()||"", awayCode?.toLowerCase()||""]
+    .sort().join(":");
+  const overrides = {
+    "ar:jo": 3, // Argentina vs Jordan
+    "at:dz": 3, // Austria vs Algeria
+    "co:cd": 2, // Colombia vs Congo
+    "co:uz": 1, // Colombia vs Uzbekistan
+  };
+  if(overrides[normalized]) return overrides[normalized];
+
+  const day = new Date(kickoffMs);
+  const utcDay = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+  const md1End = Date.UTC(2026,5,18);
+  const md2End = Date.UTC(2026,5,24);
+  const md3End = Date.UTC(2026,5,28);
+  if(utcDay <= md1End) return 1;
+  if(utcDay <= md2End) return 2;
+  if(utcDay <= md3End) return 3;
+  return 3;
+}
+
+function normalizeTeamCode(code){
+  return String(code||"").toLowerCase().trim();
+}
+
+function adjustGroupMatchdays(matches){
+  const byMatchday = {};
+  return [...matches].sort((a,b)=>a.kickoffMs - b.kickoffMs).map(match => {
+    let md = match.matchday;
+    const home = normalizeTeamCode(match.home[1]);
+    const away = normalizeTeamCode(match.away[1]);
+    while(
+      byMatchday[md]?.has(home) ||
+      byMatchday[md]?.has(away)
+    ){
+      md += 1;
+    }
+    match.matchday = md;
+    byMatchday[md] ||= new Set();
+    byMatchday[md].add(home);
+    byMatchday[md].add(away);
+    return match;
+  });
 }
 
 function seed(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}return()=>{h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);h^=h>>>16;return(h>>>0)/4294967296;};}
@@ -464,12 +517,15 @@ function LiveDataProvider({ children }){
       .eq("stage","group").not("group_code","is",null).order("kickoff_time");
     if(error){ setErr(error.message); setMatches([]); return; }
     const DAY0ms = Date.UTC(2026,5,11);
-    const live = (ms||[]).map(r=>{
+    let live = (ms||[]).map(r=>{
       const k = new Date(r.kickoff_time);
       const dayMs = Date.UTC(k.getUTCFullYear(), k.getUTCMonth(), k.getUTCDate());
+      const groupMatchday = (r.group_code != null || r.stage === "group" || r.group != null)
+        ? groupStageMatchdayFromKickoff(k.getTime(), r.home_code, r.away_code)
+        : r.matchday;
       return {
         id:r.id, external_id:r.external_id, live:true,
-        group:r.group_code, matchday:r.matchday,
+        group:r.group_code, matchday:groupMatchday,
         day: Math.round((dayMs - DAY0ms)/86400000),
         kickoffMs:k.getTime(), dbStatus:r.status,
         home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
@@ -477,6 +533,7 @@ function LiveDataProvider({ children }){
         odds:(r.home_win_odds!=null)?[r.home_win_odds, r.draw_odds, r.away_win_odds]:null,
       };
     });
+    live = adjustGroupMatchdays(live);
 
     const { data: myPreds } = await supabase
       .from("predictions").select("match_id,home_pred,away_pred").eq("user_id", meId);
