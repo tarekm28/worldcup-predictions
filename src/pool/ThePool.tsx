@@ -1039,7 +1039,7 @@ function LiveGroupStage(){
     setErr("");
     const { data: ms, error } = await supabase
       .from("matches")
-      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_win_odds,draw_odds,away_win_odds")
+      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,home_win_odds,draw_odds,away_win_odds")
       .eq("stage","group")
       .not("group_code","is",null)
       .order("kickoff_time");
@@ -1055,6 +1055,7 @@ function LiveGroupStage(){
         kickoffMs: k.getTime(), dbStatus:r.status,
         home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
         actual:{ h:r.home_score, a:r.away_score },
+        scorers:{ home:r.home_scorers ?? null, away:r.away_scorers ?? null },
         preds:{},
         odds:(r.home_win_odds!=null)?[r.home_win_odds, r.draw_odds, r.away_win_odds]:null,
       };
@@ -1212,6 +1213,10 @@ function SocialFixtureCard({ m }){
   const myTier = myBase===5?"Exact" : myBase===3?"Result" : myBase===0?"Missed" : "";
   const myLabel = myTier ? `${myTier}${myBonus>0?" + Upset":""} · +${myPts}` : "";
   const kickLabel = new Date(m.kickoffMs).toLocaleString([], { weekday:"short", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
+  const showScorers = finished && (m.scorers?.home || m.scorers?.away);
+  const scorerText = showScorers
+    ? [`${m.home[0]}: ${m.scorers.home || "–"}`, `${m.away[0]}: ${m.scorers.away || "–"}`].join(" · ")
+    : null;
   const entries = finished ? Object.keys(m.preds).map(uid=>{
     const pr = m.preds[uid];
     const base = scorePts(pr.h, pr.a, m.actual.h, m.actual.a);
@@ -1298,6 +1303,11 @@ function SocialFixtureCard({ m }){
 
         {finished && (
           <div className="mt-5">
+            {scorerText && (
+              <div className="mb-2 rounded-xl border px-3 py-2 text-[12px]" style={{ borderColor:C.lineSoft, color:C.mut2 }}>
+                <span className="font-semibold" style={{ color:C.cyan }}>Scorers:</span> {scorerText}
+              </div>
+            )}
             <div className="mb-2 flex items-center gap-3 text-[11px]" style={{ ...up, color:C.mut2 }}>
               <Users size={13}/> Everyone's picks
               <span className="ml-auto"><b style={{ color:C.lime }}>{exact}</b> exact · <b style={{ color:C.cyan }}>{result}</b> got the result</span>

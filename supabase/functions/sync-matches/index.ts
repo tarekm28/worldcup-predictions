@@ -62,8 +62,16 @@ function roundLabel(g: Game) {
 }
 
 // finished/time_elapsed -> coarse status the UI understands.
+function isFinishedFlag(finished: string): boolean {
+  return String(finished).trim().toLowerCase() === "true" || String(finished).trim() === "1";
+}
+function timeElapsedIndicatesFinished(elapsed?: string): boolean {
+  const t = String(elapsed ?? "").trim().toLowerCase();
+  if (!t) return false;
+  return /^(ft|full(\s*time)?|finished|ended|aet|after extra time|penalties?)$/i.test(t);
+}
 function statusFor(g: Game): "open" | "live" | "finished" {
-  if (String(g.finished).toUpperCase() === "TRUE") return "finished";
+  if (isFinishedFlag(g.finished) || timeElapsedIndicatesFinished(g.time_elapsed)) return "finished";
   const t = (g.time_elapsed ?? "").toLowerCase();
   if (t && t !== "notstarted") return "live";
   return "open";
