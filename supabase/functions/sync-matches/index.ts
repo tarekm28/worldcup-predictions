@@ -77,6 +77,20 @@ function statusFor(g: Game): "open" | "live" | "finished" {
   return "open";
 }
 
+// Failsafe: some feeds leave a game on "live" (or even "notstarted") long
+// after full time. If the API reports a started game whose kickoff was more
+// than 4 hours ago, treat it as finished so points can be settled.
+const FINISH_AFTER_MS = 4 * 60 * 60 * 1000;
+function effectiveStatus(
+  status: "open" | "live" | "finished",
+  kickoffIso: string | null,
+): "open" | "live" | "finished" {
+  if (status !== "live" || !kickoffIso) return status;
+  const ko = Date.parse(kickoffIso);
+  if (Number.isFinite(ko) && Date.now() - ko > FINISH_AFTER_MS) return "finished";
+  return status;
+}
+
 // UTC offset (minutes) of each 2026 host stadium during the tournament window
 // (Jun 11 – Jul 19 2026 — all US/Canada venues are in DST; Mexico has no DST).
 //  -240 Eastern (EDT) · -300 Central (CDT) · -360 Mexico (CST) · -420 Pacific (PDT)
@@ -143,6 +157,7 @@ Deno.serve(async (req) => {
   const db = createClient(url, serviceKey, { auth: { persistSession: false } });
 
   let updated = 0, inserted = 0;
+  const rowErrors: string[] = [];
   try {
     const [teamsJson, gamesJson] = await Promise.all([
       fetchJson(`${base}/get/teams`),
@@ -181,9 +196,13 @@ Deno.serve(async (req) => {
     const keyOf = (group: string | null, a: string, b: string) =>
       `${group}|${[a, b].sort().join("-")}`;
     const existingByKey: Record<string, any> = {};
+    const existingByApiId: Record<string, any> = {};
     for (const r of existing ?? []) {
       if (r.stage === "group" && r.group_code) {
         existingByKey[keyOf(r.group_code, r.home_code ?? "", r.away_code ?? "")] = r;
+      }
+      if (r.stage === "group" && r.api_fixture_id != null) {
+        existingByApiId[String(r.api_fixture_id)] = r;
       }
     }
 
@@ -192,9 +211,9 @@ Deno.serve(async (req) => {
 
     for (const g of games) {
       const stage = STAGE_FOR(g.type);
-      const status = statusFor(g);
-      const started = status !== "open";
       const kickoff = toIso(g.local_date, offsetFor(g.stadium_id));
+      const status = effectiveStatus(statusFor(g), kickoff);
+      const started = status !== "open";
       const round = roundLabel(g);
       const apiId = numOrNull(g.id);
 
@@ -203,7 +222,10 @@ Deno.serve(async (req) => {
         const aCode = codeOf(g.away_team_id);
         const md = numOrNull(g.matchday);
         const key = keyOf(g.group, hCode, aCode);
-        const row = existingByKey[key];
+        // Match by group+code pair first; fall back to the api_fixture_id
+        // stored on a previous successful sync (covers the API renaming a
+        // team or changing its iso2 code mid-tournament).
+        const row = existingByKey[key] ?? (apiId != null ? existingByApiId[String(apiId)] : undefined);
 
         // Scores only once the match has started; otherwise leave null so the
         // UI keeps showing users' predictions.
@@ -214,8 +236,9 @@ Deno.serve(async (req) => {
 
         if (row) {
           // Preserve the existing home/away orientation (and thus predictions);
-          // flip the API scores/logos if the API lists the teams the other way.
-          const sameOrientation = (row.home_code ?? "") === hCode;
+          // flip the API scores/logos only when we positively detect the API
+          // lists the pair the other way round.
+          const sameOrientation = (row.away_code ?? "") !== hCode;
           updates.push(
             db.from("matches").update({
               api_fixture_id: apiId,
@@ -230,7 +253,11 @@ Deno.serve(async (req) => {
               home_logo: sameOrientation ? flagOf(g.home_team_id) : flagOf(g.away_team_id),
               away_logo: sameOrientation ? flagOf(g.away_team_id) : flagOf(g.home_team_id),
               synced_at: new Date().toISOString(),
-            }).eq("id", row.id).then((r: any) => { if (!r.error) updated++; return r; }),
+            }).eq("id", row.id).then((r: any) => {
+              if (!r.error) updated++;
+              else rowErrors.push(`row ${row.id} (game ${g.id}): ${r.error.message}`);
+              return r;
+            }),
           );
         } else {
           inserts.push({
@@ -281,11 +308,12 @@ Deno.serve(async (req) => {
       inserted = inserts.length;
     }
 
+    const errNote = rowErrors.length ? `; errors: ${rowErrors.join(" | ")}` : "";
     await db.from("sync_log").insert({
-      mode: "all", fixtures: updated + inserted, odds: 0, ok: true,
-      message: `updated ${updated}, upserted ${inserted}`,
+      mode: "all", fixtures: updated + inserted, odds: 0, ok: rowErrors.length === 0,
+      message: `updated ${updated}, upserted ${inserted}${errNote}`,
     });
-    return new Response(JSON.stringify({ ok: true, updated, upserted: inserted }), {
+    return new Response(JSON.stringify({ ok: true, updated, upserted: inserted, errors: rowErrors }), {
       headers: { "content-type": "application/json" },
     });
   } catch (e) {

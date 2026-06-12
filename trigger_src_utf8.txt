@@ -1,0 +1,10 @@
+﻿[
+  {
+    "proname": "matches_score_trigger",
+    "prosrc": "\r\ndeclare uids uuid[];\r\nbegin\r\n  select array_agg(distinct user_id) into uids\r\n    from public.predictions where match_id = new.id;\r\n  if uids is not null then\r\n    perform public.recompute_points_for(uids);\r\n  end if;\r\n  return new;\r\nend;\r\n"
+  },
+  {
+    "proname": "score_match",
+    "prosrc": "\r\nbegin\r\n  if new.status = 'finished'\r\n     and new.home_score is not null\r\n     and new.away_score is not null\r\n     and old.status is distinct from 'finished' then\r\n\r\n    -- award points per prediction (exact = 5, correct result = 3, else 0)\r\n    update public.predictions p\r\n    set points_awarded = case\r\n      when p.home_pred = new.home_score and p.away_pred = new.away_score then 5\r\n      when sign((p.home_pred - p.away_pred)::numeric) = sign((new.home_score - new.away_score)::numeric) then 3\r\n      else 0\r\n    end\r\n    where p.match_id = new.id;\r\n\r\n    -- recompute every player's total (cheap for a small group)\r\n    update public.profiles pr\r\n    set total_points = coalesce(\r\n      (select sum(points_awarded) from public.predictions where user_id = pr.id), 0\r\n    );\r\n  end if;\r\n  return new;\r\nend;\r\n"
+  }
+]

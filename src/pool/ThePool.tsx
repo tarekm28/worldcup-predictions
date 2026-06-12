@@ -328,6 +328,9 @@ function MatchCard({ m, asOf, myPick, setMyPick }) {
   const status = statusOf(m, asOf);
   const finished = status==="finished";
   const today = status==="today";
+  const liveScoreVisible = (finished || today) && (m.actual.h != null || m.actual.a != null);
+  const homeScore = liveScoreVisible && m.actual.h != null ? m.actual.h : "–";
+  const awayScore = liveScoreVisible && m.actual.a != null ? m.actual.a : "–";
   const breakdown = finished ? PEOPLE.map(p=>{const pr=m.preds[p.id];const base=scorePts(pr.h,pr.a,m.actual.h,m.actual.a);const bonus=upsetBonus(m,pr.h,pr.a);return{p,pr,base,bonus,pts:base+bonus};}) : [];
   const exact = breakdown.filter(b=>b.base===5).length;
   const result = breakdown.filter(b=>b.base>=3).length;
@@ -343,7 +346,7 @@ function MatchCard({ m, asOf, myPick, setMyPick }) {
         </span>
       </div>
       <Scoreboard home={m.home} away={m.away} accent={finished?C.lime:today?C.magenta:C.mut2}
-        left={finished?m.actual.h:"–"} right={finished?m.actual.a:"–"} />
+        left={homeScore} right={awayScore} />
 
       {/* OPEN: editable pick */}
       {status==="open" && (
@@ -543,17 +546,27 @@ function LiveDataProvider({ children }){
 
     const finishedIds = live.filter(m=>m.dbStatus==="finished").map(m=>m.id);
     if(finishedIds.length){
-      const uidSet = new Set();
-      const { data: allPreds } = await supabase
-        .from("predictions").select("match_id,user_id,home_pred,away_pred").in("match_id", finishedIds);
-      const byMatch = {};
-      (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
-      live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
+      // Limit "everyone's picks" to users who share a league with the viewer.
+      const { data: myLeagues } = await supabase.from("league_members").select("league_id").eq("user_id", meId);
+      const leagueIds = (myLeagues||[]).map(r=>r.league_id);
+      if(leagueIds.length){
+        const { data: members } = await supabase.from("league_members").select("user_id").in("league_id", leagueIds);
+        const memberIds = [...new Set((members||[]).map(r=>r.user_id))];
+        if(memberIds.length){
+          const uidSet = new Set();
+          const { data: allPreds } = await supabase
+            .from("predictions").select("match_id,user_id,home_pred,away_pred")
+            .in("match_id", finishedIds).in("user_id", memberIds);
+          const byMatch = {};
+          (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
+          live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
 
-      const ids = [...uidSet];
-      if(ids.length){
-        const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
-        const pmap = {}; (profs||[]).forEach(p=>{ pmap[p.id] = p; }); setProfilesMap(pmap);
+          const ids = [...uidSet];
+          if(ids.length){
+            const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
+            const pmap = {}; (profs||[]).forEach(p=>{ pmap[p.id] = p; }); setProfilesMap(pmap);
+          }
+        }
       }
     }
     setMatches(live);
@@ -940,8 +953,12 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
   const status = statusOf(m, 0);
   const finished = status==="finished";
   const today = status==="today";
+  const pastOpen = today && m.dbStatus==="open" && Date.now() - m.kickoffMs > 4 * 60 * 60 * 1000;
   const dayLabel = fmtDay(m.day);
   const kickLabel = new Date(m.kickoffMs).toLocaleString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
+  const liveScoreVisible = (finished || today) && (m.actual.h != null || m.actual.a != null);
+  const homeScore = liveScoreVisible && m.actual.h != null ? m.actual.h : "–";
+  const awayScore = liveScoreVisible && m.actual.a != null ? m.actual.a : "–";
   const entries = finished ? Object.keys(m.preds).map(uid=>{
     const pr = m.preds[uid];
     const base = scorePts(pr.h, pr.a, m.actual.h, m.actual.a);
@@ -958,12 +975,13 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
         <span className="flex items-center gap-2">
           <UpsetTag m={m} finished={finished}/>
           {finished ? <Tag color={C.mut}>Full time</Tag>
+            : pastOpen ? <Tag color={C.magenta}><span className="h-1.5 w-1.5 rounded-full" style={{ background:C.magenta }}/> Awaiting live feed</Tag>
             : today ? <Tag color={C.magenta}><Lock size={11}/> Locked · {dayLabel}</Tag>
             : <Tag color={C.cyan}>{dayLabel}</Tag>}
         </span>
       </div>
       <Scoreboard home={m.home} away={m.away} accent={finished?C.lime:today?C.magenta:C.mut2}
-        left={finished?(m.actual.h ?? "–"):"–"} right={finished?(m.actual.a ?? "–"):"–"} />
+        left={homeScore} right={awayScore} />
 
       {status==="open" && (
         <div className="mt-3 rounded p-3" style={{ background:C.bg }}>
@@ -986,7 +1004,9 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
 
       {today && (
         <div className="mt-3 flex items-center justify-between rounded p-3" style={{ background:C.bg }}>
-          <span className="text-xs font-bold" style={{ ...up, color:C.magenta }}>Locked · result pending</span>
+          <span className="text-xs font-bold" style={{ ...up, color:C.magenta }}>
+            {pastOpen ? "Awaiting live feed" : "Locked · result pending"}
+          </span>
           <span className="flex items-center gap-2 text-xs" style={{ color:C.mut }}>
             <Lock size={12}/> {myPick.saved ? `Your pick ${myPick.h}–${myPick.a}` : "No pick made"}
           </span>
@@ -1069,21 +1089,44 @@ function LiveGroupStage(){
 
     const finishedIds = live.filter(m=>m.dbStatus==="finished").map(m=>m.id);
     if(finishedIds.length){
-      const { data: allPreds } = await supabase
-        .from("predictions").select("match_id,user_id,home_pred,away_pred").in("match_id", finishedIds);
-      const byMatch = {}; const uidSet = new Set();
-      (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
-      live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
-      const ids = [...uidSet];
-      if(ids.length){
-        const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
-        const pmap = {}; (profs||[]).forEach(p=>{ pmap[p.id] = p; }); setProfilesMap(pmap);
+      // Limit everyone's picks to users who share a league with the viewer.
+      const { data: myLeagues } = await supabase.from("league_members").select("league_id").eq("user_id", user.id);
+      const leagueIds = (myLeagues||[]).map(r=>r.league_id);
+      if(leagueIds.length){
+        const { data: members } = await supabase.from("league_members").select("user_id").in("league_id", leagueIds);
+        const memberIds = [...new Set((members||[]).map(r=>r.user_id))];
+        if(memberIds.length){
+          const { data: allPreds } = await supabase
+            .from("predictions").select("match_id,user_id,home_pred,away_pred").in("match_id", finishedIds).in("user_id", memberIds);
+          const byMatch = {}; const uidSet = new Set();
+          (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
+          live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
+          const ids = [...uidSet];
+          if(ids.length){
+            const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
+            const pmap = {}; (profs||[]).forEach(p=>{ pmap[p.id] = p; }); setProfilesMap(pmap);
+          }
+        }
       }
     }
     setMatches(live);
   }
 
   useEffect(()=>{ load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[]);
+
+  // Auto-update: reload when the backend changes (realtime), plus a 60s
+  // polling fallback so scores/results appear without a manual refresh.
+  useEffect(()=>{
+    let t;
+    const bump = ()=>{ clearTimeout(t); t = setTimeout(()=>load(), 300); };
+    const ch = supabase.channel("live-group-stage")
+      .on("postgres_changes",{ event:"*", schema:"public", table:"matches" }, bump)
+      .on("postgres_changes",{ event:"*", schema:"public", table:"predictions" }, bump)
+      .subscribe();
+    const poll = setInterval(()=>load(), 60000);
+    return ()=>{ clearTimeout(t); clearInterval(poll); supabase.removeChannel(ch); };
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  },[]);
 
   async function onPick(matchId, pick){
     setMyPicks(s=>({ ...s, [matchId]:{ h:pick.h, a:pick.a, saved:true } }));
@@ -1202,6 +1245,9 @@ function SocialFixtureCard({ m }){
   const finished = status==="finished", today = status==="today";
   const myPick = myPicks[m.id] || { h:0, a:0, saved:false };
   const sv = saving[m.id];
+  const liveScoreVisible = (finished || today) && (m.actual.h != null || m.actual.a != null);
+  const homeScore = liveScoreVisible && m.actual.h != null ? m.actual.h : "–";
+  const awayScore = liveScoreVisible && m.actual.a != null ? m.actual.a : "–";
   // Once finished, score the viewer's own pick against the real result and pick
   // an accuracy colour: green = exact score, white = right winner only, red = wrong.
   const hasResult = finished && m.actual.h!=null && m.actual.a!=null;
@@ -1249,9 +1295,9 @@ function SocialFixtureCard({ m }){
             <span className="truncate font-bold" style={{ ...up, fontSize:15 }}>{m.home[0]}</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="grid place-items-center rounded-lg" style={{ fontFamily:fDisp,fontWeight:700,fontSize:38,minWidth:54,height:58,background:C.bg,color:accent }}>{finished?(m.actual.h??"–"):"–"}</span>
+            <span className="grid place-items-center rounded-lg" style={{ fontFamily:fDisp,fontWeight:700,fontSize:38,minWidth:54,height:58,background:C.bg,color:accent }}>{homeScore}</span>
             <span style={{ color:C.mut2, fontSize:20 }}>:</span>
-            <span className="grid place-items-center rounded-lg" style={{ fontFamily:fDisp,fontWeight:700,fontSize:38,minWidth:54,height:58,background:C.bg,color:accent }}>{finished?(m.actual.a??"–"):"–"}</span>
+            <span className="grid place-items-center rounded-lg" style={{ fontFamily:fDisp,fontWeight:700,fontSize:38,minWidth:54,height:58,background:C.bg,color:accent }}>{awayScore}</span>
           </div>
           <div className="flex min-w-0 flex-1 flex-col items-center gap-2 text-center">
             <Flag code={m.away[1]} size={34}/>
