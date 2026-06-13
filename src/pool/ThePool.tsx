@@ -516,7 +516,7 @@ function LiveDataProvider({ children }){
     setErr("");
     const { data: ms, error } = await supabase
       .from("matches")
-      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_win_odds,draw_odds,away_win_odds")
+      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,home_win_odds,draw_odds,away_win_odds")
       .eq("stage","group").not("group_code","is",null).order("kickoff_time");
     if(error){ setErr(error.message); setMatches([]); return; }
     const DAY0ms = Date.UTC(2026,5,11);
@@ -533,6 +533,7 @@ function LiveDataProvider({ children }){
         kickoffMs:k.getTime(), dbStatus:r.status,
         home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
         actual:{ h:r.home_score, a:r.away_score }, preds:{},
+        scorers:{ home:r.home_scorers ?? null, away:r.away_scorers ?? null },
         odds:(r.home_win_odds!=null)?[r.home_win_odds, r.draw_odds, r.away_win_odds]:null,
       };
     });
@@ -582,7 +583,9 @@ function LiveDataProvider({ children }){
       .on("postgres_changes",{ event:"*", schema:"public", table:"matches" }, bump)
       .on("postgres_changes",{ event:"*", schema:"public", table:"predictions" }, bump)
       .subscribe();
-    return ()=>{ clearTimeout(t); supabase.removeChannel(ch); };
+    // 60s polling fallback in case realtime fails
+    const poll = setInterval(()=>load(), 60000);
+    return ()=>{ clearTimeout(t); clearInterval(poll); supabase.removeChannel(ch); };
   },[load]);
 
   const onPick = useCallback(async (matchId, pick)=>{
