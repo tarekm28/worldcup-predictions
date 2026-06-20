@@ -1441,9 +1441,6 @@ function FixturesPage(){
     <div>
       {err && <div className="mb-3 rounded-lg px-3 py-2 text-xs" style={{ background:"rgba(236,44,142,.12)", border:`1px solid ${C.magenta}55`, color:C.magenta }}>{err}</div>}
       <MatchdayScorerPick/>
-+      <div className="mb-3 rounded-lg px-3 py-2 text-xs" style={{ background:'#07112a', border:`1px solid ${C.lineSoft}`, color:C.mut }}>
-+        <b style={{ color:C.cyan }}>Debug:</b> meId: {meId || 'not-signed-in'} · isAdmin: {String(!!isAdmin)}
-+      </div>
       <div className="mx-auto max-w-2xl space-y-6">
         {days.map(d=>(
           <section key={d} className="space-y-4">
