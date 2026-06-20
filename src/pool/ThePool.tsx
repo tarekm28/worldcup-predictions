@@ -506,6 +506,7 @@ function useLive(){ return useContext(LiveDataContext); }
 function LiveDataProvider({ children }){
   const { user } = useAuth();
   const meId = user.id;
+  const [isAdmin,setIsAdmin] = useState(false);
   const [matches,setMatches]       = useState(null); // null = loading
   const [myPicks,setMyPicks]       = useState({});    // matchId -> { h, a, saved }
   const [profilesMap,setProfilesMap] = useState({});
@@ -516,7 +517,7 @@ function LiveDataProvider({ children }){
     setErr("");
     const { data: ms, error } = await supabase
       .from("matches")
-      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,home_win_odds,draw_odds,away_win_odds")
+      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,unlocked,home_win_odds,draw_odds,away_win_odds")
       .eq("stage","group").not("group_code","is",null).order("kickoff_time");
     if(error){ setErr(error.message); setMatches([]); return; }
     const DAY0ms = Date.UTC(2026,5,11);
@@ -570,6 +571,12 @@ function LiveDataProvider({ children }){
         }
       }
     }
+
+    // Fetch current user's profile to detect admin capability
+    try{
+      const { data: meProf } = await supabase.from("profiles").select("id,is_admin").eq("id", meId).single();
+      setIsAdmin(!!(meProf && meProf.is_admin));
+    }catch(e){ /* ignore */ }
     setMatches(live);
   }, [meId]);
 
@@ -599,7 +606,7 @@ function LiveDataProvider({ children }){
     setTimeout(()=>setSaving(s=>{ const n={ ...s }; if(n[matchId]==="saved") delete n[matchId]; return n; }), 1500);
   },[meId]);
 
-  const value = { matches, myPicks, profilesMap, saving, err, onPick, meId, reload:load };
+  const value = { matches, myPicks, profilesMap, saving, err, onPick, meId, isAdmin, reload:load };
   return <LiveDataContext.Provider value={value}>{children}</LiveDataContext.Provider>;
 }
 
@@ -953,6 +960,7 @@ function Home({ go, matches, asOf }){
  * Live group stage — real matches + predictions from Supabase
  * ------------------------------------------------------------------ */
 function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
+  const { isAdmin, reload } = useLive();
   const status = statusOf(m, 0);
   const finished = status==="finished";
   const today = status==="today";
@@ -981,6 +989,14 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
             : pastOpen ? <Tag color={C.magenta}><span className="h-1.5 w-1.5 rounded-full" style={{ background:C.magenta }}/> Awaiting live feed</Tag>
             : today ? <Tag color={C.magenta}><Lock size={11}/> Locked · {dayLabel}</Tag>
             : <Tag color={C.cyan}>{dayLabel}</Tag>}
+          {isAdmin && !finished && (
+            <button onClick={async ()=>{
+              try{
+                await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id);
+                reload();
+              }catch(e){ console.error(e); }
+            }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
+          )}
         </span>
       </div>
       <Scoreboard home={m.home} away={m.away} accent={finished?C.lime:today?C.magenta:C.mut2}
@@ -1243,7 +1259,7 @@ function BigStepper({ value, onChange }){
   );
 }
 function SocialFixtureCard({ m }){
-  const { myPicks, onPick, saving, profilesMap, meId } = useLive();
+  const { myPicks, onPick, saving, profilesMap, meId, isAdmin, reload } = useLive();
   const status = statusOf(m, 0);
   const finished = status==="finished", today = status==="today";
   const myPick = myPicks[m.id] || { h:0, a:0, saved:false };
@@ -1288,6 +1304,9 @@ function SocialFixtureCard({ m }){
           {finished ? <Tag color={C.mut}>Full time</Tag>
             : today ? <Tag color={C.magenta}><span className="h-1.5 w-1.5 rounded-full" style={{ background:C.magenta }}/> Locked</Tag>
             : <Tag color={C.cyan}><Clock size={11}/> {kickLabel}</Tag>}
+          {isAdmin && !finished && (
+            <button onClick={async ()=>{ try{ await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id); reload(); }catch(e){ console.error(e); } }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
+          )}
         </span>
       </div>
 
