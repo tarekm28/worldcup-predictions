@@ -992,6 +992,15 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
             : <Tag color={C.cyan}>{dayLabel}</Tag>}
           {isAdmin && !finished && (
             <button onClick={async ()=>{
+              // Diagnostic: confirm current auth user and profile is_admin before updating
+              const me = supabase.auth.getUser ? await supabase.auth.getUser() : null;
+              const meIdLocal = me?.data?.user?.id || meId;
+              const { data: prof, error: profErr } = await supabase.from('profiles').select('id,is_admin').eq('id', meIdLocal).single();
+              if(profErr || !prof || !prof.is_admin){
+                console.warn('Admin toggle denied - local check failed', { meId: meIdLocal, prof, profErr });
+                alert('You are not an admin (profile check failed). Ensure you are logged in as the admin user.');
+                return;
+              }
               const { data, error } = await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id);
               if(error){ console.error('unlock error', error); alert('Failed to toggle unlock: '+(error.message||error)); return; }
               reload();
@@ -1002,7 +1011,7 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
       <Scoreboard home={m.home} away={m.away} accent={finished?C.lime:today?C.magenta:C.mut2}
         left={homeScore} right={awayScore} />
 
-      {status==="open" && (
+      {(status==="open" || (today && m.unlocked)) && (
         <div className="mt-3 rounded p-3" style={{ background:C.bg }}>
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold" style={{ ...up, color:C.cyan }}>Your call</span>
@@ -1013,7 +1022,7 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
             </div>
           </div>
           <div className="mt-2 flex items-center justify-between text-[11px]" style={{ color:C.mut2 }}>
-            <span className="inline-flex items-center gap-1"><Lock size={10}/> Locks {kickLabel}</span>
+            <span className="inline-flex items-center gap-1"><Lock size={10}/> {m.unlocked ? "Unlocked · editable" : `Locks ${kickLabel}`}</span>
             <span style={{ color: saving==="saving"?C.cyan : saving==="saved"?C.lime : myPick.saved?C.mut : C.mut2 }}>
               {saving==="saving" ? "Saving…" : saving==="saved" ? "Saved ✓" : myPick.saved ? "Picked" : "Not set"}
             </span>
@@ -1021,7 +1030,7 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
         </div>
       )}
 
-      {today && (
+      {today && !m.unlocked && (
         <div className="mt-3 flex items-center justify-between rounded p-3" style={{ background:C.bg }}>
           <span className="text-xs font-bold" style={{ ...up, color:C.magenta }}>
             {pastOpen ? "Awaiting live feed" : "Locked · result pending"}
@@ -1305,7 +1314,20 @@ function SocialFixtureCard({ m }){
             : today ? <Tag color={C.magenta}><span className="h-1.5 w-1.5 rounded-full" style={{ background:C.magenta }}/> Locked</Tag>
             : <Tag color={C.cyan}><Clock size={11}/> {kickLabel}</Tag>}
           {isAdmin && !finished && (
-            <button onClick={async ()=>{ const { data, error } = await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id); if(error){ console.error('unlock error', error); alert('Failed to toggle unlock: '+(error.message||error)); return; } reload(); }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
+            <button onClick={async ()=>{
+              // Diagnostic: confirm current auth user and profile is_admin before updating
+              const me = supabase.auth.getUser ? await supabase.auth.getUser() : null;
+              const meIdLocal = me?.data?.user?.id || (window?.localStorage?.getItem('supabase.auth.token')? null : null);
+              const { data: prof, error: profErr } = await supabase.from('profiles').select('id,is_admin').eq('id', meIdLocal || meId).single();
+              if(profErr || !prof || !prof.is_admin){
+                console.warn('Admin toggle denied - local check failed', { meId: meIdLocal||meId, prof });
+                alert('You are not an admin (profile check failed). Ensure you are logged in as the admin user.');
+                return;
+              }
+              const { data, error } = await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id);
+              if(error){ console.error('unlock error', error); alert('Failed to toggle unlock: '+(error.message||error)); return; }
+              reload();
+            }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
           )}
         </span>
       </div>
@@ -1341,7 +1363,7 @@ function SocialFixtureCard({ m }){
           </div>
         )}
 
-        {status==="open" && (
+        {(status==="open" || (today && m.unlocked)) && (
           <div className="mt-5 rounded-xl p-4" style={{ background:C.bg }}>
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold" style={{ ...up, color:C.cyan }}>Your prediction</span>
@@ -1355,12 +1377,12 @@ function SocialFixtureCard({ m }){
               <BigStepper value={myPick.a} onChange={v=>onPick(m.id,{ ...myPick, a:v })}/>
             </div>
             <div className="mt-3 flex items-center justify-center gap-1.5 text-[11px]" style={{ color:C.mut2 }}>
-              <Lock size={11}/> Locks at kickoff · {kickLabel}{m.odds && <span className="ml-2">odds {m.odds.join(" / ")}</span>}
+              <Lock size={11}/> {m.unlocked ? "Unlocked · editable" : `Locks at kickoff · ${kickLabel}`}{m.odds && <span className="ml-2">odds {m.odds.join(" / ")}</span>}
             </div>
           </div>
         )}
 
-        {today && (
+        {today && !m.unlocked && (
           <div className="mt-5 flex items-center justify-between rounded-xl p-4" style={{ background:C.bg }}>
             <span className="text-xs font-bold" style={{ ...up, color:C.magenta }}>Locked · result pending</span>
             <span className="flex items-center gap-2 text-sm" style={{ color:C.mut }}>
@@ -1406,7 +1428,7 @@ function SocialFixtureCard({ m }){
 }
 
 function FixturesPage(){
-  const { matches, err } = useLive();
+  const { matches, err, meId, isAdmin } = useLive();
   if(matches===null) return <LiveLoading label="Loading fixtures…"/>;
   if(matches.length===0) return <LiveEmpty err={err}/>;
   // Every match in chronological order (by real kickoff time), grouped under a
@@ -1419,11 +1441,14 @@ function FixturesPage(){
     <div>
       {err && <div className="mb-3 rounded-lg px-3 py-2 text-xs" style={{ background:"rgba(236,44,142,.12)", border:`1px solid ${C.magenta}55`, color:C.magenta }}>{err}</div>}
       <MatchdayScorerPick/>
++      <div className="mb-3 rounded-lg px-3 py-2 text-xs" style={{ background:'#07112a', border:`1px solid ${C.lineSoft}`, color:C.mut }}>
++        <b style={{ color:C.cyan }}>Debug:</b> meId: {meId || 'not-signed-in'} · isAdmin: {String(!!isAdmin)}
++      </div>
       <div className="mx-auto max-w-2xl space-y-6">
         {days.map(d=>(
           <section key={d} className="space-y-4">
             <div className="flex items-center gap-2"><Calendar size={15} style={{ color:C.cyan }}/><h3 className="text-lg font-bold" style={{ ...up, color:C.cyan }}>{d}</h3></div>
-            {ordered.filter(m=>dayKey(m)===d).map(m=><SocialFixtureCard key={m.id} m={m}/>)}
+            {ordered.filter(m=>dayKey(m)===d).map(m=><SocialFixtureCard key={m.id} m={m}/>) }
           </section>
         ))}
       </div>
