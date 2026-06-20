@@ -532,6 +532,7 @@ function LiveDataProvider({ children }){
         group:r.group_code, matchday:groupMatchday,
         day: Math.round((dayMs - DAY0ms)/86400000),
         kickoffMs:k.getTime(), dbStatus:r.status,
+        unlocked: r.unlocked,
         home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
         actual:{ h:r.home_score, a:r.away_score }, preds:{},
         scorers:{ home:r.home_scorers ?? null, away:r.away_scorers ?? null },
@@ -991,10 +992,9 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
             : <Tag color={C.cyan}>{dayLabel}</Tag>}
           {isAdmin && !finished && (
             <button onClick={async ()=>{
-              try{
-                await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id);
-                reload();
-              }catch(e){ console.error(e); }
+              const { data, error } = await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id);
+              if(error){ console.error('unlock error', error); alert('Failed to toggle unlock: '+(error.message||error)); return; }
+              reload();
             }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
           )}
         </span>
@@ -1305,7 +1305,7 @@ function SocialFixtureCard({ m }){
             : today ? <Tag color={C.magenta}><span className="h-1.5 w-1.5 rounded-full" style={{ background:C.magenta }}/> Locked</Tag>
             : <Tag color={C.cyan}><Clock size={11}/> {kickLabel}</Tag>}
           {isAdmin && !finished && (
-            <button onClick={async ()=>{ try{ await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id); reload(); }catch(e){ console.error(e); } }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
+            <button onClick={async ()=>{ const { data, error } = await supabase.from('matches').update({ unlocked: !m.unlocked }).eq('id', m.id); if(error){ console.error('unlock error', error); alert('Failed to toggle unlock: '+(error.message||error)); return; } reload(); }} className="ml-2 rounded px-2 py-1 text-xs font-bold" style={{ background: m.unlocked?C.orange:C.violet, color:'#fff' }}>{m.unlocked?"Lock":"Unlock"}</button>
           )}
         </span>
       </div>
