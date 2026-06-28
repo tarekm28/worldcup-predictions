@@ -264,6 +264,11 @@ const KNOCKOUT = [
   { round:"Final", date:"Jul 19", ties:[["Winner SF·1","Winner SF·2"]] },
 ];
 
+// Knockout round normalization + prefixes used for bracket slot keys
+const KO_ROUND_ORDER = ["Round of 32","Round of 16","Quarter-final","Semi-final","Final"];
+const KO_ROUND_PREFIX = { "Round of 32":"R32", "Round of 16":"R16", "Quarter-final":"QF", "Semi-final":"SF", "Final":"Final" };
+function normalizeRound(r){ if(!r) return r; const s=String(r).trim(); if(s.toLowerCase().includes("quarter")) return "Quarter-final"; if(s.toLowerCase().includes("semi")) return "Semi-final"; if(s.toLowerCase().includes("round of 32")) return "Round of 32"; if(s.toLowerCase().includes("round of 16")) return "Round of 16"; if(s.toLowerCase().includes("final")) return "Final"; return s; }
+
 /* ------------------------------------------------------------------ *
  * Shared atoms
  * ------------------------------------------------------------------ */
@@ -496,6 +501,84 @@ function resolveR32(q){
   }));
 }
 
+// KO prediction helpers: mirror projResult semantics but for KO rows
+function koResult(m, myPicks){
+  if(m.dbStatus==="finished" && m.actual && m.actual.h!=null && m.actual.a!=null)
+    return { h:m.actual.h, a:m.actual.a, real:true };
+  const p = myPicks?.[m.id];
+  if(p && p.saved) return { h:p.h, a:p.a, real:false };
+  return null;
+}
+function koWinner(m, myPicks){
+  const r = koResult(m, myPicks);
+  if(!r) return null;
+  if(r.h > r.a) return { team: m.home, real: r.real };
+  if(r.a > r.h) return { team: m.away, real: r.real };
+  return null; // draw: no winner until user fixes prediction
+}
+
+// Propagate knockout winners through the bracket using real KO rows when present
+function resolveKnockoutBracket(groupMatches, koMatches, myPicks, bracketSlotToMatch){
+  const q = projectedQualifiers(groupMatches, myPicks);
+  const r32Resolved = resolveR32(q).map(tie=>tie.map(slot=>{
+    // resolveR32 returns { label, team } entries — normalise to { label, team, real }
+    if(slot && typeof slot === "object") return { label: slot.label, team: slot.team || null, real: false };
+    return { label: slot };
+  }));
+
+  const roundKeys = ["R32","R16","QF","SF","Final"];
+  const out = { r32: r32Resolved, r16:[], qf:[], sf:[], final:[] };
+  const resolvedByPrefix = { R32: r32Resolved };
+
+  // helper to pick projected winner from a resolved tie (prefer first slot)
+  const projectedWinnerFromTie = (tie) => {
+    if(!tie) return null;
+    if(tie[0] && tie[0].team) return { team: tie[0].team, real: false };
+    if(tie[1] && tie[1].team) return { team: tie[1].team, real: false };
+    return null;
+  };
+
+  // iterate rounds from R16 onwards using KNOCKOUT template
+  for(let ri=1; ri<KNOCKOUT.length; ri++){
+    const tmpl = KNOCKOUT[ri];
+    const prefix = KO_ROUND_PREFIX[tmpl.round] || tmpl.round;
+    const ties = tmpl.ties.map(tieSlots => {
+      return tieSlots.map(slotStr => {
+        // slotStr is like "Winner R32·1"
+        const feedKey = String(slotStr).replace(/^Winner\s+/, "");
+        // prefer a real KO match if one exists for this feeding slot
+        const koMatch = bracketSlotToMatch?.[feedKey];
+        if(koMatch){
+          const w = koWinner(koMatch, myPicks);
+          if(w) return { label: slotStr, team: w.team, real: !!w.real };
+          // if no winner yet, but teams present on the match, show slots (projected) if available
+          const home = koMatch.home, away = koMatch.away;
+          return { label: slotStr, team: null };
+        }
+        // fallback: find the previous-round resolved tie and take its projected winner
+        // feedKey like R32·1 -> prefixPrev = R32, idx
+        const parts = feedKey.split('·');
+        const prevPrefix = parts[0];
+        const idx = parseInt(parts[1], 10);
+        const prevResolved = resolvedByPrefix[prevPrefix];
+        const prevTie = prevResolved ? prevResolved[idx-1] : null;
+        const proj = projectedWinnerFromTie(prevTie);
+        if(proj) return { label: slotStr, team: proj.team, real: false };
+        return { label: slotStr };
+      });
+    });
+    // save the resolved ties array under the short key
+    const short = prefix;
+    resolvedByPrefix[short] = ties;
+    if(prefix === 'R16' || prefix === 'R16') out.r16 = ties;
+    if(prefix === 'QF') out.qf = ties;
+    if(prefix === 'SF') out.sf = ties;
+    if(prefix === 'Final' || prefix === 'Final') out.final = ties;
+  }
+
+  return out;
+}
+
 /* ================================================================== *
  * Live data layer — one Supabase load shared across Fixtures,
  * Group stage and Knockout, with realtime + projections.
@@ -508,6 +591,8 @@ function LiveDataProvider({ children }){
   const meId = user.id;
   const [isAdmin,setIsAdmin] = useState(false);
   const [matches,setMatches]       = useState(null); // null = loading
+  const [koMatches,setKoMatches]   = useState(null);
+  const [bracketSlotToMatch,setBracketSlotToMatch] = useState({});
   const [myPicks,setMyPicks]       = useState({});    // matchId -> { h, a, saved }
   const [profilesMap,setProfilesMap] = useState({});
   const [saving,setSaving]         = useState({});
@@ -541,13 +626,53 @@ function LiveDataProvider({ children }){
     });
     live = adjustGroupMatchdays(live);
 
+    // Load KO rows as well (keeps group query unchanged)
+    let liveKo = null;
+    try{
+      const { data: kos, error: koErr } = await supabase
+        .from("matches")
+        .select("id,external_id,round,home_team,away_team,home_code,away_code,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,unlocked,home_win_odds,draw_odds,away_win_odds")
+        .eq("stage","ko").order("kickoff_time");
+      if(koErr){ console.warn('ko load error', koErr); setKoMatches([]); setBracketSlotToMatch({}); }
+      else {
+        const liveKo = (kos||[]).map(r=>{
+          const k = new Date(r.kickoff_time);
+          return {
+            id:r.id, external_id:r.external_id, live:true, stage:'ko',
+            round: normalizeRound(r.round), kickoffMs:k.getTime(), dbStatus:r.status,
+            unlocked: r.unlocked,
+            home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
+            actual:{ h:r.home_score, a:r.away_score }, preds:{},
+            scorers:{ home:r.home_scorers ?? null, away:r.away_scorers ?? null },
+            odds:(r.home_win_odds!=null)?[r.home_win_odds, r.draw_odds, r.away_win_odds]:null,
+          };
+        });
+        // assign bracketSlot per round by kickoff ordering
+        const byRound = {};
+        (liveKo||[]).forEach(m=>{ const rn = m.round || ""; (byRound[rn] ||= []).push(m); });
+        Object.keys(byRound).forEach(rn=>{
+          byRound[rn].sort((a,b)=>a.kickoffMs - b.kickoffMs).forEach((m,i)=>{
+            const prefix = KO_ROUND_PREFIX[rn] || rn || 'KO';
+            m.bracketSlot = `${prefix}·${i+1}`;
+          });
+        });
+        const bmap = {};
+        (liveKo||[]).forEach(m=>{ if(m.bracketSlot) bmap[m.bracketSlot] = m; });
+        setKoMatches(liveKo);
+        setBracketSlotToMatch(bmap);
+      }
+    }catch(e){ console.warn('ko load failed', e); setKoMatches([]); setBracketSlotToMatch({}); }
+
     const { data: myPreds } = await supabase
       .from("predictions").select("match_id,home_pred,away_pred").eq("user_id", meId);
     const picks = {};
     (myPreds||[]).forEach(p=>{ picks[p.match_id] = { h:p.home_pred, a:p.away_pred, saved:true }; });
     setMyPicks(picks);
 
-    const finishedIds = live.filter(m=>m.dbStatus==="finished").map(m=>m.id);
+    // prefer the freshly-loaded KO rows (liveKo) when computing finished IDs
+    const finishedIds = [ ...live.filter(m=>m.dbStatus==="finished").map(m=>m.id) ];
+    // if we loaded KO rows above, include those finished ids too
+    try{ if(typeof liveKo !== 'undefined' && liveKo) finishedIds.push(...liveKo.filter(k=>k.dbStatus==="finished").map(k=>k.id)); }catch(e){}
     if(finishedIds.length){
       // Limit "everyone's picks" to users who share a league with the viewer.
       const { data: myLeagues } = await supabase.from("league_members").select("league_id").eq("user_id", meId);
@@ -607,7 +732,7 @@ function LiveDataProvider({ children }){
     setTimeout(()=>setSaving(s=>{ const n={ ...s }; if(n[matchId]==="saved") delete n[matchId]; return n; }), 1500);
   },[meId]);
 
-  const value = { matches, myPicks, profilesMap, saving, err, onPick, meId, isAdmin, reload:load };
+  const value = { matches, koMatches, bracketSlotToMatch, myPicks, profilesMap, saving, err, onPick, meId, isAdmin, reload:load };
   return <LiveDataContext.Provider value={value}>{children}</LiveDataContext.Provider>;
 }
 
@@ -727,7 +852,7 @@ function BkSlotTeam({ item }){
     return (
       <span className="bk-team" style={{ display:"flex", alignItems:"center", gap:4, color:item.team?C.text:undefined }}>
         {item.team
-          ? <><Flag code={item.team[1]} size={11}/><span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>{item.team[0]}</span></>
+          ? <><Flag code={item.team[1]} size={11}/><span style={{ overflow:"hidden", textOverflow:"ellipsis", color: (item.real?C.text:C.violet) }}>{item.team[0]}</span></>
           : item.label}
       </span>
     );
@@ -1074,169 +1199,10 @@ function LiveMatchCard({ m, myPick, onPick, saving, profilesMap, meId }){
 }
 
 function LiveGroupStage(){
-  const { user } = useAuth();
-  const [mode,setMode] = useState("group");
-  const [sel,setSel] = useState("all");
-  const [matches,setMatches] = useState(null);  // null = loading
-  const [myPicks,setMyPicks] = useState({});     // matchId -> { h, a, saved }
-  const [profilesMap,setProfilesMap] = useState({});
-  const [saving,setSaving] = useState({});       // matchId -> "saving" | "saved"
-  const [err,setErr] = useState("");
-
-  async function load(){
-    setErr("");
-    const { data: ms, error } = await supabase
-      .from("matches")
-      .select("id,external_id,home_team,away_team,home_code,away_code,group_code,matchday,kickoff_time,status,home_score,away_score,home_scorers,away_scorers,home_win_odds,draw_odds,away_win_odds")
-      .eq("stage","group")
-      .not("group_code","is",null)
-      .order("kickoff_time");
-    if(error){ setErr(error.message); setMatches([]); return; }
-    const DAY0ms = Date.UTC(2026,5,11);
-    const live = (ms||[]).map(r=>{
-      const k = new Date(r.kickoff_time);
-      const dayMs = Date.UTC(k.getUTCFullYear(), k.getUTCMonth(), k.getUTCDate());
-      return {
-        id:r.id, external_id:r.external_id, live:true,
-        group:r.group_code, matchday:r.matchday,
-        day: Math.round((dayMs - DAY0ms)/86400000),
-        kickoffMs: k.getTime(), dbStatus:r.status,
-        home:[r.home_team, r.home_code], away:[r.away_team, r.away_code],
-        actual:{ h:r.home_score, a:r.away_score },
-        scorers:{ home:r.home_scorers ?? null, away:r.away_scorers ?? null },
-        preds:{},
-        odds:(r.home_win_odds!=null)?[r.home_win_odds, r.draw_odds, r.away_win_odds]:null,
-      };
-    });
-
-    const { data: myPreds } = await supabase
-      .from("predictions").select("match_id,home_pred,away_pred").eq("user_id", user.id);
-    const picks = {};
-    (myPreds||[]).forEach(p=>{ picks[p.match_id] = { h:p.home_pred, a:p.away_pred, saved:true }; });
-    setMyPicks(picks);
-
-    const finishedIds = live.filter(m=>m.dbStatus==="finished").map(m=>m.id);
-    if(finishedIds.length){
-      // Limit everyone's picks to users who share a league with the viewer.
-      const { data: myLeagues } = await supabase.from("league_members").select("league_id").eq("user_id", user.id);
-      const leagueIds = (myLeagues||[]).map(r=>r.league_id);
-      if(leagueIds.length){
-        const { data: members } = await supabase.from("league_members").select("user_id").in("league_id", leagueIds);
-        const memberIds = [...new Set((members||[]).map(r=>r.user_id))];
-        if(memberIds.length){
-          const { data: allPreds } = await supabase
-            .from("predictions").select("match_id,user_id,home_pred,away_pred").in("match_id", finishedIds).in("user_id", memberIds);
-          const byMatch = {}; const uidSet = new Set();
-          (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
-          live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
-          const ids = [...uidSet];
-          if(ids.length){
-            const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
-            const pmap = {}; (profs||[]).forEach(p=>{ pmap[p.id] = p; }); setProfilesMap(pmap);
-          }
-        }
-      }
-    }
-    setMatches(live);
-  }
-
-  useEffect(()=>{ load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[]);
-
-  // Auto-update: reload when the backend changes (realtime), plus a 60s
-  // polling fallback so scores/results appear without a manual refresh.
-  useEffect(()=>{
-    let t;
-    const bump = ()=>{ clearTimeout(t); t = setTimeout(()=>load(), 300); };
-    const ch = supabase.channel("live-group-stage")
-      .on("postgres_changes",{ event:"*", schema:"public", table:"matches" }, bump)
-      .on("postgres_changes",{ event:"*", schema:"public", table:"predictions" }, bump)
-      .subscribe();
-    const poll = setInterval(()=>load(), 60000);
-    return ()=>{ clearTimeout(t); clearInterval(poll); supabase.removeChannel(ch); };
-    /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  },[]);
-
-  async function onPick(matchId, pick){
-    setMyPicks(s=>({ ...s, [matchId]:{ h:pick.h, a:pick.a, saved:true } }));
-    setSaving(s=>({ ...s, [matchId]:"saving" }));
-    const { error } = await supabase.from("predictions").upsert(
-      { user_id:user.id, match_id:matchId, home_pred:pick.h, away_pred:pick.a },
-      { onConflict:"user_id,match_id" }
-    );
-    if(error){ setSaving(s=>({ ...s, [matchId]:undefined })); setErr(error.message); return; }
-    setSaving(s=>({ ...s, [matchId]:"saved" }));
-    setTimeout(()=>setSaving(s=>{ const n={ ...s }; if(n[matchId]==="saved") delete n[matchId]; return n; }), 1500);
-  }
-
-  if(matches===null) return (
-    <div className="rounded-xl p-8 text-center" style={{ background:C.bg2, border:`1px solid ${C.lineSoft}` }}>
-      <p className="text-sm" style={{ color:C.mut }}>Loading fixtures…</p>
-    </div>
-  );
-  if(matches.length===0) return (
-    <div className="rounded-xl p-8 text-center" style={{ background:C.bg2, border:`1px solid ${C.lineSoft}` }}>
-      <Calendar size={26} style={{ color:C.mut2 }} className="mx-auto"/>
-      <h3 className="mt-3 text-lg font-bold" style={{ ...up, color:C.cyan }}>No fixtures yet</h3>
-      <p className="mt-1 text-sm" style={{ color:C.mut }}>{err || "Run the group-stage seed in Supabase to load the schedule."}</p>
-    </div>
-  );
-
-  const groupsPresent = [...new Set(matches.map(m=>m.group))].sort();
-  const pickFor = id => myPicks[id] || { h:0, a:0, saved:false };
-  const renderCard = m => <LiveMatchCard key={m.id} m={m} myPick={pickFor(m.id)} onPick={onPick} saving={saving[m.id]} profilesMap={profilesMap} meId={user.id}/>;
-
-  return (
-    <div>
-      {err && <div className="mb-3 rounded-lg px-3 py-2 text-xs" style={{ background:"rgba(236,44,142,.12)", border:`1px solid ${C.magenta}55`, color:C.magenta }}>{err}</div>}
-      <div className="mb-5 flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-lg p-1" style={{ background:C.bg2 }}>
-          {[["group","By group"],["matchday","By match day"]].map(([k,l])=>(
-            <button key={k} onClick={()=>setMode(k)} className="rounded px-3 py-1 text-xs font-bold" style={{ ...up, background:mode===k?C.violet:"transparent", color:mode===k?"#fff":C.mut }}>{l}</button>
-          ))}
-        </div>
-        {mode==="group" && (
-          <div className="flex flex-wrap items-center gap-1">
-            {["all",...groupsPresent].map(k=>(
-              <button key={k} onClick={()=>setSel(k)} className="rounded px-2.5 py-1 text-xs font-bold" style={{ ...up, background:sel===k?C.tile:"transparent", color:sel===k?C.cyan:C.mut2, border:`1px solid ${sel===k?C.line:"transparent"}` }}>{k==="all"?"All":k}</button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {mode==="group" ? (
-        <div className="space-y-8">
-          {groupsPresent.filter(g=>sel==="all"||sel===g).map(g=>(
-            <section key={g}>
-              <div className="mb-3 flex items-baseline gap-3">
-                <h3 className="text-xl font-bold" style={{ ...up, color:C.cyan }}>Group {g}</h3>
-                <span className="text-xs" style={{ color:C.mut2 }}>top 2 advance</span>
-              </div>
-              <div className="grid gap-4 lg:grid-cols-[minmax(280px,360px)_1fr]">
-                <StandingsTable rows={standingsFor(matches,g,0)} />
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {matches.filter(m=>m.group===g).map(renderCard)}
-                </div>
-              </div>
-            </section>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-6">
-          {[1,2,3].map(md=>(
-            <section key={md}>
-              <div className="mb-3 flex items-center gap-2">
-                <Calendar size={15} style={{ color:C.cyan }}/>
-                <h3 className="text-lg font-bold" style={{ ...up, color:C.cyan }}>Match day {md}</h3>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {matches.filter(m=>m.matchday===md).map(renderCard)}
-              </div>
-            </section>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  const { matches, myPicks, onPick } = useLive();
+  if(matches===null) return <LiveLoading label="Loading group stage…"/>;
+  if(matches.length===0) return <LiveEmpty/>;
+  return <GroupStage matches={matches} asOf={0} myPicks={myPicks} setMyPick={onPick} />;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1428,7 +1394,7 @@ function SocialFixtureCard({ m }){
 }
 
 function FixturesPage(){
-  const { matches, err, meId, isAdmin } = useLive();
+  const { koMatches: matches, err, meId, isAdmin } = useLive();
   if(matches===null) return <LiveLoading label="Loading fixtures…"/>;
   if(matches.length===0) return <LiveEmpty err={err}/>;
   // Every match in chronological order (by real kickoff time), grouped under a
@@ -1593,15 +1559,17 @@ function ProjectedQualification({ matches, myPicks }){
 }
 
 function LiveKnockout(){
-  const { matches, myPicks } = useLive();
+  const { matches, koMatches, bracketSlotToMatch, myPicks } = useLive();
   if(matches===null) return <LiveLoading label="Loading bracket…"/>;
   if(matches.length===0) return <LiveEmpty/>;
-  const q = projectedQualifiers(matches, myPicks);
-  const r32 = resolveR32(q);
+  const resolved = resolveKnockoutBracket(matches, koMatches||[], myPicks, bracketSlotToMatch||{});
   const R = KNOCKOUT;
   const half = a => [a.slice(0,a.length/2), a.slice(a.length/2)];
-  const [r32L,r32R]=half(r32), [r16L,r16R]=half(R[1].ties), [qfL,qfR]=half(R[2].ties), [sfL,sfR]=half(R[3].ties);
-  const fin=R[4].ties[0];
+  const [r32L,r32R] = half(resolved.r32 || []);
+  const [r16L,r16R] = half(resolved.r16 || R[1].ties);
+  const [qfL,qfR]   = half(resolved.qf || R[2].ties);
+  const [sfL,sfR]   = half(resolved.sf || R[3].ties);
+  const fin = resolved.final && resolved.final[0] ? resolved.final[0] : R[4].ties[0];
   return (
     <div className="space-y-10">
       <ProjectedQualification matches={matches} myPicks={myPicks}/>
@@ -1841,7 +1809,7 @@ function fmtClock(ms){
   return new Date(ms).toLocaleString([], { weekday:"short", month:"short", day:"numeric", hour:"numeric", minute:"2-digit" });
 }
 function MatchdayScorerPick(){
-  const { matches } = useLive();
+  const { matches, koMatches } = useLive();
   const { user } = useAuth();
   const [pick,setPick]     = useState(undefined); // undefined=loading, null=none
   const [selMatch,setSel]  = useState(null);
@@ -1857,14 +1825,26 @@ function MatchdayScorerPick(){
   const [now,setNow] = useState(Date.now());
   useEffect(()=>{ const t=setInterval(()=>setNow(Date.now()),30000); return ()=>clearInterval(t); },[]);
 
+  // Choose which match set to use for the scorer pick:
+  // - while any group-stage matches remain (not finished), use group `matches`
+  // - once group stage is complete, fall back to `koMatches` so picks move to RO32/RO16
+  const allMatches = useMemo(()=>{
+    try{
+      const groupHasFuture = (matches||[]).some(m=>statusOf(m, now)!=="finished");
+      if(groupHasFuture) return matches || [];
+      if(koMatches && koMatches.length) return koMatches;
+      return matches || [];
+    }catch(e){ return matches || []; }
+  },[matches, koMatches, now]);
+
   // Active matchday = earliest matchday that still has a match yet to kick off;
   // otherwise the most recent one. Deadlines are PER-MATCH (each game's own
   // kickoff), so within a matchday you can still pick a later game after an
   // earlier one has already started.
   const active = useMemo(()=>{
-    if(!matches || matches.length===0) return null;
+    if(!allMatches || allMatches.length===0) return null;
     const by={};
-    matches.forEach(m=>{ const s=matchdaySlug(m); (by[s] ||= []).push(m); });
+    allMatches.forEach(m=>{ const s=matchdaySlug(m); (by[s] ||= []).push(m); });
     const list = Object.entries(by).map(([slug,ms])=>({
       slug,
       ms: [...ms].sort((a,b)=>(a.kickoffMs||0)-(b.kickoffMs||0)),
@@ -1872,7 +1852,9 @@ function MatchdayScorerPick(){
     }));
     const upcoming = list.filter(e=>e.ms.some(m=>(m.kickoffMs||0)>now)).sort((a,b)=>a.firstKick-b.firstKick);
     return upcoming[0] ?? list.sort((a,b)=>b.firstKick-a.firstKick)[0] ?? null;
-  },[matches, now]);
+  },[allMatches, now]);
+  // note: keep dependency on matches/koMatches; active should recompute when either changes
+  // (avoid stale closures)
 
   // The match you picked has its own deadline (its kickoff): once it starts the
   // pick is locked. With no pick and no remaining upcoming match, picking is closed.
