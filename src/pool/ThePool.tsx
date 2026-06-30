@@ -635,7 +635,7 @@ function LiveDataProvider({ children }){
         .eq("stage","ko").order("kickoff_time");
       if(koErr){ console.warn('ko load error', koErr); setKoMatches([]); setBracketSlotToMatch({}); }
       else {
-        const liveKo = (kos||[]).map(r=>{
+         liveKo = (kos||[]).map(r=>{
           const k = new Date(r.kickoff_time);
           return {
             id:r.id, external_id:r.external_id, live:true, stage:'ko',
@@ -688,6 +688,15 @@ function LiveDataProvider({ children }){
           const byMatch = {};
           (allPreds||[]).forEach(p=>{ (byMatch[p.match_id] ||= {})[p.user_id] = { h:p.home_pred, a:p.away_pred }; uidSet.add(p.user_id); });
           live.forEach(m=>{ if(byMatch[m.id]) m.preds = byMatch[m.id]; });
+          if (liveKo) {
+            liveKo.forEach(m => { if (byMatch[m.id]) m.preds = byMatch[m.id]; });
+            // Update the state so the UI receives the enriched objects
+            setKoMatches(liveKo);
+            // Also update the bracketSlotToMatch map if those objects are used
+            const updatedBmap = {};
+            liveKo.forEach(m => { if (m.bracketSlot) updatedBmap[m.bracketSlot] = m; });
+            setBracketSlotToMatch(updatedBmap);
+          }
 
           const ids = [...uidSet];
           if(ids.length){
